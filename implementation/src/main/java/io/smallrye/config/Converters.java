@@ -1950,16 +1950,28 @@ public final class Converters {
             /**
              * {@link Class#getEnumConstants()} calls {@code values()} through {@link Method#invoke}, whose first use
              * builds a reflective accessor and spins bytecode for it. A direct handle widened to {@code ()Object} is a
-             * view with a pregenerated invoker. Falls back to the reflective call when the enum is not accessible.
+             * view with a pregenerated invoker.
+             * <p>
+             * The handle is looked up with {@link MethodHandles.Lookup#findStatic} first: unlike
+             * {@link Class#getMethod}, it does not build the reflection data of the enum (a {@link Method} object for
+             * every method of the class and its supertypes) and does not need {@code unreflect}. That requires the
+             * enum to be accessible from this class; otherwise it falls back to the reflective lookup, and in the
+             * last resort to {@link Class#getEnumConstants()}.
              */
             @SuppressWarnings("unchecked")
             private static <E> E[] enumConstants(final Class<E> enumType) {
                 try {
-                    Method values = enumType.getMethod("values");
-                    if (!isAccessible(values)) {
-                        values.setAccessible(true);
+                    MethodHandle handle;
+                    try {
+                        handle = MethodHandles.lookup().findStatic(enumType, "values", methodType(enumType.arrayType()));
+                    } catch (IllegalAccessException e) {
+                        Method values = enumType.getMethod("values");
+                        if (!isAccessible(values)) {
+                            values.setAccessible(true);
+                        }
+                        handle = MethodHandles.lookup().unreflect(values);
                     }
-                    MethodHandle handle = MethodHandles.lookup().unreflect(values).asType(methodType(Object.class));
+                    handle = handle.asType(methodType(Object.class));
                     return (E[]) (Object) handle.invokeExact();
                 } catch (Throwable t) {
                     return enumType.getEnumConstants();
