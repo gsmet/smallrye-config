@@ -17,13 +17,15 @@ package io.smallrye.config;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 
-import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.Serial;
 import java.io.UncheckedIOException;
 import java.net.URL;
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
+import java.util.Arrays;
 import java.util.Map;
 import java.util.Properties;
 import java.util.function.Consumer;
@@ -81,13 +83,79 @@ public class PropertiesConfigSource extends MapBackedConfigValueConfigSource {
         ClassPathUtils.consumeStream(locationOfProperties, new Consumer<>() {
             @Override
             public void accept(InputStream inputStream) {
-                try (BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream, UTF_8))) {
-                    properties.load(reader);
+                try {
+                    // Read the file at once rather than paying for the 8 KB buffers of a BufferedReader, a
+                    // StreamDecoder and the line reader on every file. A file whose characters all fit in
+                    // ISO-8859-1, which most do, is parsed from its bytes through the byte path of the line
+                    // reader, transcoded in place when it has accented characters; anything else is decoded as
+                    // UTF-8 first.
+                    byte[] bytes = readAll(inputStream);
+                    int length = toLatin1(bytes);
+                    if (length >= 0) {
+                        properties.load(bytes, length);
+                    } else {
+                        CharBuffer chars = UTF_8.decode(ByteBuffer.wrap(bytes));
+                        properties.load(chars.array(), chars.limit());
+                    }
                 } catch (IOException e) {
                     throw new UncheckedIOException(e);
                 }
             }
         });
         return properties;
+    }
+
+    /**
+     * Reads the stream to the end into an array of exactly its size when the stream announces it, which the
+     * streams of a jar entry, of a file and of an in-memory resource do.
+     */
+    private static byte[] readAll(InputStream inputStream) throws IOException {
+        int expected = inputStream.available();
+        byte[] bytes = new byte[expected];
+        int read = expected == 0 ? 0 : inputStream.readNBytes(bytes, 0, expected);
+        if (read < expected) {
+            return Arrays.copyOf(bytes, read);
+        }
+        int next = inputStream.read();
+        if (next == -1) {
+            return bytes;
+        }
+        // the stream has more than it announced (or announced nothing): read the rest the generic way
+        ByteArrayOutputStream rest = new ByteArrayOutputStream(Math.max(expected * 2, 1024));
+        rest.write(bytes);
+        rest.write(next);
+        inputStream.transferTo(rest);
+        return rest.toByteArray();
+    }
+
+    /**
+     * Transcodes UTF-8 bytes to ISO-8859-1 in place, and returns the resulting length, or -1 when the content has
+     * a character that ISO-8859-1 cannot represent or a sequence that is not valid UTF-8. ASCII bytes are left
+     * untouched, so an ASCII file costs one scan and nothing else.
+     */
+    private static int toLatin1(byte[] bytes) {
+        int length = bytes.length;
+        int out = 0;
+        for (int in = 0; in < length; in++) {
+            byte b = bytes[in];
+            if (b >= 0) {
+                if (out != in) {
+                    bytes[out] = b;
+                }
+                out++;
+                continue;
+            }
+            // a two-byte sequence, 110xxxxx 10xxxxxx, encodes U+0080 to U+07FF; ISO-8859-1 stops at U+00FF
+            if ((b & 0xE0) != 0xC0 || in + 1 == length || (bytes[in + 1] & 0xC0) != 0x80) {
+                return -1;
+            }
+            int codePoint = (b & 0x1F) << 6 | bytes[in + 1] & 0x3F;
+            if (codePoint < 0x80 || codePoint > 0xFF) {
+                return -1;
+            }
+            bytes[out++] = (byte) codePoint;
+            in++;
+        }
+        return out;
     }
 }

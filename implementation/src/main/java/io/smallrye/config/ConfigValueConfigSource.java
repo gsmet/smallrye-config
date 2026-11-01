@@ -354,6 +354,20 @@ public interface ConfigValueConfigSource extends ConfigSource {
             load0(new LineReader(inStream));
         }
 
+        /**
+         * Loads the properties from characters already in memory, without any intermediate buffer.
+         */
+        synchronized void load(char[] chars, int length) throws IOException {
+            load0(new LineReader(chars, length));
+        }
+
+        /**
+         * Loads the properties from ISO-8859-1 bytes already in memory, without any intermediate buffer.
+         */
+        synchronized void load(byte[] bytes, int length) throws IOException {
+            load0(new LineReader(bytes, length));
+        }
+
         private void load0(LineReader lr) throws IOException {
             char[] convtBuf = new char[1024];
             int limit;
@@ -421,11 +435,37 @@ public interface ConfigValueConfigSource extends ConfigSource {
             public LineReader(InputStream inStream) {
                 this.inStream = inStream;
                 inByteBuf = new byte[8192];
+                bytes = true;
             }
 
             public LineReader(Reader reader) {
                 this.reader = reader;
                 inCharBuf = new char[8192];
+            }
+
+            LineReader(char[] chars, int length) {
+                inCharBuf = chars;
+                inLimit = length;
+            }
+
+            LineReader(byte[] bytes, int length) {
+                inByteBuf = bytes;
+                inLimit = length;
+                this.bytes = true;
+            }
+
+            /** Whether the input is in {@link #inByteBuf}, read as ISO-8859-1, or in {@link #inCharBuf}. */
+            private boolean bytes;
+
+            private int refill() throws IOException {
+                if (inStream != null) {
+                    return inStream.read(inByteBuf);
+                }
+                if (reader != null) {
+                    return reader.read(inCharBuf);
+                }
+                // the characters were handed over at construction: there is nothing more to read
+                return -1;
             }
 
             byte[] inByteBuf;
@@ -453,8 +493,7 @@ public interface ConfigValueConfigSource extends ConfigSource {
 
                 while (true) {
                     if (inOff >= inLimit) {
-                        inLimit = (inStream == null) ? reader.read(inCharBuf)
-                                : inStream.read(inByteBuf);
+                        inLimit = refill();
                         inOff = 0;
                         if (inLimit <= 0) {
                             if (len == 0 || isCommentLine) {
@@ -466,7 +505,7 @@ public interface ConfigValueConfigSource extends ConfigSource {
                             return len;
                         }
                     }
-                    if (inStream != null) {
+                    if (bytes) {
                         //The line below is equivalent to calling a
                         //ISO8859-1 decoder.
                         c = (char) (0xff & inByteBuf[inOff++]);
@@ -528,9 +567,7 @@ public interface ConfigValueConfigSource extends ConfigSource {
                             continue;
                         }
                         if (inOff >= inLimit) {
-                            inLimit = (inStream == null)
-                                    ? reader.read(inCharBuf)
-                                    : inStream.read(inByteBuf);
+                            inLimit = refill();
                             inOff = 0;
                             if (inLimit <= 0) {
                                 if (precedingBackslash) {
